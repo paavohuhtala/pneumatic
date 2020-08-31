@@ -1,9 +1,9 @@
-use crate::protocol::{Connection, Message};
+use crate::{networking::Connection, protocol::ClientMessage};
 use std::net::SocketAddrV4;
 use tokio::net::TcpStream;
 
 pub struct Client {
-    pub connection: Option<Connection>,
+    connection: Option<Connection>,
 }
 
 impl Client {
@@ -20,6 +20,17 @@ impl Client {
             connection: Some(connection),
         }
     }
+
+    async fn send_message_stream(connection: &mut Connection, message: ClientMessage) {
+        connection.stream.send_bincode(&message).await;
+    }
+
+    pub async fn send_message(&mut self, message: ClientMessage) {
+        match self.connection.as_mut() {
+            None => {}
+            Some(connection) => Self::send_message_stream(connection, message).await,
+        }
+    }
 }
 
 impl Drop for Client {
@@ -29,7 +40,7 @@ impl Drop for Client {
             Some(connection) => {
                 tokio::spawn(async move {
                     let mut connection = connection;
-                    connection.send_message(Message::Disconnect).await;
+                    Self::send_message_stream(&mut connection, ClientMessage::Disconnect).await
                 });
             }
         }

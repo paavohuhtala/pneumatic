@@ -1,5 +1,9 @@
 use pneumatic::server::MockFileSystem;
-use pneumatic::{client::Client, protocol::Message, server::Server};
+use pneumatic::{
+    client::Client,
+    protocol::{ClientMessage, Greeting},
+    server::Server,
+};
 use std::{
     error::Error,
     net::{Ipv4Addr, SocketAddrV4},
@@ -17,12 +21,9 @@ async fn connect_then_dc() -> Result<(), Box<dyn Error>> {
     let mut client = Client::connect(address).await;
 
     client
-        .connection
-        .as_mut()
-        .unwrap()
-        .send_message(Message::Greeting {
+        .send_message(ClientMessage::Greeting(Greeting {
             protocol_version: 1,
-        })
+        }))
         .await;
 
     let server_reader = server.read().await;

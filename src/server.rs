@@ -1,4 +1,7 @@
-use crate::protocol::{Connection, Message};
+use crate::{
+    networking::Connection,
+    protocol::{ClientMessage, GreetingResponse, ReqRes},
+};
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -22,6 +25,22 @@ impl FileSystem for MockFileSystem {
     }
 }
 
+struct ServerConnection(Connection);
+
+impl ServerConnection {
+    pub fn new(connetion: Connection) -> Self {
+        ServerConnection(connetion)
+    }
+
+    pub async fn receive(&mut self, buffer: &mut Vec<u8>) -> ClientMessage {
+        self.0.stream.receive_bincode(buffer).await
+    }
+
+    pub async fn respond<S: ReqRes>(&mut self, _req: S, res: S::Response) {
+        self.0.stream.send_bincode(&res).await;
+    }
+}
+
 pub struct Session {
     address: SocketAddr,
 }
@@ -42,25 +61,25 @@ enum ControlMessage {
 impl Server {
     async fn handle_client(
         mut server_channel: tokio::sync::mpsc::Sender<ControlMessage>,
-        mut connection: Connection,
+        mut connection: ServerConnection,
         session: SharedSession,
     ) {
         let session_reader = session.read().await;
         let address = session_reader.address.clone();
         drop(session_reader);
 
+        let mut message_buffer = Vec::new();
+
         loop {
-            let message = connection.read_message().await;
+            let message = connection.receive(&mut message_buffer).await;
 
             match message {
-                Message::Greeting { .. } => {
+                ClientMessage::Greeting(greeting) => {
                     connection
-                        .send_message(Message::Greeting {
-                            protocol_version: 1,
-                        })
+                        .respond(greeting, GreetingResponse::ProtocolOk)
                         .await;
                 }
-                Message::Disconnect => {
+                ClientMessage::Disconnect => {
                     println!("Client {} disconnecting.", address);
 
                     server_channel
@@ -92,6 +111,7 @@ impl Server {
                     Ok((stream, address)) = socket.accept() => {
                         println!("Connection received from {}", address);
                         let connection = Connection::new_encrypted(stream).await;
+                        let connection = ServerConnection::new(connection);
 
                         let session = Arc::new(RwLock::new(Session { address }));
 
@@ -99,14 +119,17 @@ impl Server {
                         server_writer.sessions.insert(address, session.clone());
                         drop(server_writer);
 
-                        println!("Client added :D {:?}", address);
-
                         task::spawn(async move {
                             Self::handle_client(sender, connection, session).await;
                         });
                     },
-                    control_message = receiver.recv() => {
-                        println!(":DDD")
+                    Some(control_message) = receiver.recv() => {
+                        match control_message {
+                            ControlMessage::Shutdown => {
+                                todo!()
+                            },
+                            ControlMessage::Disconnect(address) => { }
+                        }
                     }
                 }
             }
