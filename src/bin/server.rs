@@ -12,9 +12,13 @@ use time::Instant;
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let root_path = args.get(1).expect("Expected path as the first argument");
+    let root_path = PathBuf::from(root_path);
+
     let begin = time::Instant::now();
 
-    let root_path = PathBuf::from(r#"E:\SteamLibrary"#);
     let fs = pneumatic::transfer::StdFilesystem::new(&root_path);
     let fs_arc = Arc::new(fs);
 

@@ -1,10 +1,14 @@
 use crate::config::ServerConfig;
 use async_trait::async_trait;
+use crossbeam::queue::SegQueue;
 use futures::future;
 use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 use tokio::fs::read_dir;
@@ -59,35 +63,67 @@ impl FileSystem for StdFilesystem {
     async fn discover_files_recursively(
         self: Arc<Self>,
         path: PathBuf,
-        mut output: tokio::sync::mpsc::Sender<DiscoveryMessage>,
+        output: tokio::sync::mpsc::Sender<DiscoveryMessage>,
     ) -> Result<(), anyhow::Error> {
-        let mut file_stream = read_dir(path).await?;
-        let mut subtasks = Vec::new();
-        let mut files = Vec::new();
+        let processing_queue = Arc::new(SegQueue::new());
+        let folders_to_process = Arc::new(AtomicU64::new(1));
 
-        while let Some(entry) = file_stream.next_entry().await? {
-            let file_type = entry.file_type().await?;
-            let path = entry.path();
+        processing_queue.push(path);
 
-            if file_type.is_dir() {
-                let output = output.clone();
-                let fs = self.clone();
+        let mut tasks = Vec::new();
 
-                let handle = tokio::spawn(async move {
-                    fs.discover_files_recursively(path, output).await.unwrap()
-                });
+        const CONCURRENCY_LIMIT: u32 = 16;
 
-                subtasks.push(handle);
-            } else {
-                let metadata = entry.metadata().await?;
-                let metadata = self.convert_metadata(&path, metadata);
-                files.push(metadata);
-            }
+        for _ in 0..CONCURRENCY_LIMIT {
+            let fs = self.clone();
+            let queue = processing_queue.clone();
+            let mut output = output.clone();
+            let folders_to_process = folders_to_process.clone();
+
+            let task = tokio::spawn(async move {
+                loop {
+                    if folders_to_process.load(Ordering::SeqCst) == 0 {
+                        break;
+                    }
+
+                    let path: PathBuf = match queue.pop() {
+                        Ok(path) => path,
+                        Err(_) => {
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                    };
+
+                    let mut file_stream = read_dir(path).await?;
+                    let mut files = Vec::new();
+
+                    while let Some(entry) = file_stream.next_entry().await? {
+                        let file_type = entry.file_type().await?;
+                        let path = entry.path();
+
+                        if file_type.is_dir() {
+                            folders_to_process.fetch_add(1, Ordering::SeqCst);
+                            queue.push(path);
+                        } else {
+                            let metadata = entry.metadata().await?;
+                            let metadata = fs.convert_metadata(&path, metadata);
+                            files.push(metadata);
+                        }
+                    }
+
+                    output.send(DiscoveryMessage::Files(files)).await?;
+
+                    folders_to_process.fetch_sub(1, Ordering::SeqCst);
+                }
+
+                let ret: Result<(), anyhow::Error> = Ok(());
+                ret
+            });
+
+            tasks.push(task);
         }
 
-        output.send(DiscoveryMessage::Files(files)).await?;
-
-        future::join_all(subtasks).await;
+        future::join_all(tasks).await;
 
         Ok(())
     }
