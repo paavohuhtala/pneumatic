@@ -11,6 +11,8 @@ ring = "0.16.15"
 thiserror = "1.0.20"
 anyhow = "1.0.32"
 derive_more = "0.99.9"
+async-trait = "0.1.40"
+futures = "0.3.5"
 
 [dependencies.tokio]
 version = "0.2.22"
